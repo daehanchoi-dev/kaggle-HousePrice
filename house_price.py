@@ -200,3 +200,100 @@ models = pd.DataFrame({
     'Score' : ['score_lasso', 'score_ENet', 'score_KRR', 'score_xgb', 'score_lgb']})
 print(models.sort_values(by='Score', ascending=True))
 
+### Stacking Models ###
+# Simplest Stacking approach - Averaging base models
+
+class AveragingModels(BaseEstimator, RegressorMixin, TransformerMixin):
+    def __init__(self, models):
+        self.models = models
+
+    # define clones of the original models to fit the data in
+    def fit(self, X, y):
+        self.models_ = [clone(x) for x in self.models]
+
+        # Train cloned base models
+        for model in self.models_:
+            model.fit(X,y)
+        return self
+
+    # Prediction for cloned models and average them
+    def predict(self, X):
+        predictions = np.column_stack([
+            model.predict(X) for model in self.models_
+        ])
+        return np.mean(predictions, axis=1)
+
+# Apply some models for Averaged base models score
+averaged_models = AveragingModels(models = (lasso, ENet, KRR, GBoost, model_lgb, model_xgb))
+score = rmsle_cv(averaged_models)
+print("Averaged base models score : {:.4f} ({:.4f})\n".format(score.mean(), score.std()))
+
+### Less simple stacking - Adding a meta model
+
+class StackingAveragedModels(BaseEstimator, RegressorMixin, TransformerMixin):
+    def __init__(self, base_models, meta_model, n_fold=5):
+        self.base_models = base_models
+        self.meta_models = meta_model
+        self.n_folds = n_folds
+
+    def fit(self, X, y):
+        self.base_models_ = [list() for x in self.base_models]
+        self.meta_models_ = clone(self.meta_models)
+        kfold = KFold(n_splits=self.n_folds, shuffle=True, random_state=156)
+
+        # Train cloned base models and create out-of-fold predictions
+        # Then, now out-of-fold predictions need to train train the cloned meta-model
+        out_of_fold_predictions = np.zeros((X.shape[0], len(self.base_models)))
+        for i, model in enumerate(self.base_models):
+            for train_index, holdout_index in kfold.split(X,y):
+                instance = clone(model)
+                self.base_models_[i].append(instance)
+                instance.fit(X[train_index], y[train_index])
+                y_pred = instance.predict(X[holdout_index])
+                out_of_fold_predictions[holdout_index, i] = y_pred
+
+        # Train the cloned meta-model using the out-of-fold-predictions as new feature
+        self.meta_models_.fit(out_of_fold_predictions, y)
+        return self
+
+        # Using the average each models
+        def predict(self, X):
+            meta_features = np.column_stack([
+                np.column_stack([model.predict(X) for model in base_models]).mean(axis=1)
+                for base_models in self.base_models_])
+            return self.meta_model_.predict(meta_features)
+
+stacked_average_models = StackingAveragedModels(
+    base_models=(ENet, GBoost, KRR),
+    meta_model=(lasso)
+)
+
+score = rmsle_cv(stacked_average_models)
+print("Stacking Averaged models score: {:.4f} ({:.4f})".format(score.mean(), score.std()))
+
+def rmsle(y, y_pred):
+    return np.sqrt(mean_squared_error(y, y_pred))
+
+# Stacked_average_models
+stacked_average_models.fit(df_train.values, y_train)
+stacked_train_pred = stacked_average_models.predict(df_train.values)
+stacked_pred = np.expm1(stacked_average_models.predict(df_test.values))
+print(rmsle(y_train, stacked_train_pred))
+
+# Model_lgb
+model_lgb.fit(df_train, y_train)
+lgb_train_pred = model_lgb.predict(df_train)
+lgb_pred = np.expm1(model_lgb.predict(df_test.values))
+print(rmsle(y_train, lgb_train_pred))
+
+# Model_xgb
+model_xgb.fit(df_train, y_train)
+xgb_train_pred = model_xgb.predict(df_train)
+xgb_pred = np.expm1(model_xgb.predict(df_test))
+print(rmsle(y_train, xgb_train_pred))
+
+'''RMSE on the entire Train data when averaging'''
+
+print('RMSLE score on train data:')
+print(rmsle(y_train,stacked_train_pred*0.70 +
+               xgb_train_pred*0.15 + lgb_train_pred*0.15 ))
